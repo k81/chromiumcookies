@@ -1,15 +1,14 @@
-package cookies_test
+package chromiumcookies_test
 
 import (
 	"testing"
 
+	"github.com/k81/chromiumcookies"
 	"github.com/stretchr/testify/require"
-
-	"github.com/k81/cookies"
 )
 
 func TestCookiesLoad(t *testing.T) {
-	cookies, err := cookies.LoadAll()
+	cookies, err := chromiumcookies.LoadAll()
 	require.NoError(t, err)
 	require.NotEmpty(t, cookies)
 }
