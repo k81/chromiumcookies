@@ -2,5 +2,6 @@ Load chromium cookies from sqlite on linux.
 
 Example Code:
 ```go
-	cookies, err := chromiumcookies.LoadAll()
+    jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	_ = chromiumcookies.LoadIntoJar(jar)
 ```

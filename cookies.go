@@ -9,51 +9,32 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"os/user"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/pbkdf2"
 )
-
-const SQLSelectAll = `select host_key,name,value,encrypted_value,path,is_secure,is_httponly,is_persistent,expires_utc,creation_utc,last_access_utc from cookies`
 
 var (
 	salt = "saltysalt"
 	iv   = bytes.Repeat([]byte(" "), 16)
 )
 
-// Cookie - Items for a cookie
-type Cookie struct {
-	Name           string
-	Value          string
-	Domain         string
-	Path           string
-	Secure         bool
-	HttpOnly       bool
-	Persistent     bool
-	Expires        time.Time
-	Creation       time.Time
-	LastAccess     time.Time
-	EncryptedValue []byte
-}
-
 // DecryptedValue - Get the unencrypted value of a Chrome cookie
-func (c *Cookie) Decrypt(key []byte) (err error) {
-	if c.Value > "" {
-		return nil
+func decrypt(key []byte, encrypted []byte) (value string, err error) {
+
+	if len(encrypted) <= 3 {
+		return "", errors.New("too short encrypted valud")
 	}
 
-	if len(c.EncryptedValue) <= 3 {
-		return nil
-	}
-
-	encrypted := c.EncryptedValue[3:]
+	encrypted = encrypted[3:]
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil
+		return "", err
 	}
 
 	decrypted := make([]byte, len(encrypted))
@@ -61,17 +42,15 @@ func (c *Cookie) Decrypt(key []byte) (err error) {
 	cbc.CryptBlocks(decrypted, encrypted)
 
 	if len(decrypted)%16 != 0 {
-		return errors.New("decrypted data block length is not multiple of 16 bytes")
+		return "", errors.New("decrypted data block length is not multiple of 16 bytes")
 	}
 
 	padLen := int(decrypted[len(decrypted)-1])
 	if padLen > 16 {
-		return fmt.Errorf("invalid padding length: %v", padLen)
+		return "", fmt.Errorf("invalid padding length: %v", padLen)
 	}
 
-	c.Value = string(decrypted[:len(decrypted)-padLen])
-
-	return nil
+	return string(decrypted[:len(decrypted)-padLen]), nil
 }
 
 func getSecret() (secret string, err error) {
@@ -82,18 +61,18 @@ func getSecret() (secret string, err error) {
 	return string(result), nil
 }
 
-func LoadAll() (cookies []*Cookie, err error) {
+func LoadIntoJar(jar http.CookieJar) (err error) {
 	// get secret
 	secret, err := getSecret()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	key := pbkdf2.Key([]byte(secret), []byte(salt), 1, 16, sha1.New)
 
 	usr, err := user.Current()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	cookiesFile := fmt.Sprintf("%s/.config/chromium/Default/Cookies", usr.HomeDir)
@@ -106,47 +85,45 @@ func LoadAll() (cookies []*Cookie, err error) {
 		_ = db.Close()
 	}()
 
-	rows, err := db.Query(SQLSelectAll)
+	rows, err := db.Query("select host_key,name,value,encrypted_value,path,is_secure,is_httponly from cookies")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() {
 		_ = rows.Close()
 	}()
 
-	cookies = make([]*Cookie, 0, 256)
 	for rows.Next() {
 		var (
-			c             = &Cookie{}
-			expiresUTC    int64
-			creationUTC   int64
-			lastAccessUTC int64
+			cookie         = &http.Cookie{}
+			encryptedValue []byte
 		)
 
-		if err = rows.Scan(&c.Domain,
-			&c.Name,
-			&c.Value,
-			&c.EncryptedValue,
-			&c.Path,
-			&c.Secure,
-			&c.HttpOnly,
-			&c.Persistent,
-			&expiresUTC,
-			&creationUTC,
-			&lastAccessUTC,
+		if err = rows.Scan(
+			&cookie.Domain,
+			&cookie.Name,
+			&cookie.Value,
+			&encryptedValue,
+			&cookie.Path,
+			&cookie.Secure,
+			&cookie.HttpOnly,
 		); err != nil {
-			return nil, err
+			return err
 		}
 
-		c.Expires = time.Unix(expiresUTC/1000000-11644473600, 0)
-		c.Creation = time.Unix(creationUTC/1000000-11644473600, 0)
-		c.LastAccess = time.Unix(lastAccessUTC/1000000-11644473600, 0)
-
-		if err = c.Decrypt(key); err != nil {
-			return nil, err
+		if len(encryptedValue) > 3 {
+			if ver := string(encryptedValue[:3]); ver != "v11" {
+				return fmt.Errorf("unsupported encryption version: %v", ver)
+			}
+			if cookie.Value, err = decrypt(key, encryptedValue); err != nil {
+				return errors.New("decryption failed")
+			}
 		}
-		cookies = append(cookies, c)
+
+		jar.SetCookies(&url.URL{Scheme: "http", Host: cookie.Domain}, []*http.Cookie{
+			cookie,
+		})
 	}
 
-	return cookies, nil
+	return nil
 }
